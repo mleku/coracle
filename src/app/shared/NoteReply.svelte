@@ -2,12 +2,23 @@
   import {Tags} from "paravel"
   import {createEventDispatcher} from "svelte"
   import {without, uniq} from "ramda"
+  import {getGroupAddress, asNostrEvent} from "src/util/nostr"
   import {slide} from "src/util/transition"
   import ImageInput from "src/partials/ImageInput.svelte"
   import Chip from "src/partials/Chip.svelte"
   import Media from "src/partials/Media.svelte"
   import Compose from "src/app/shared/Compose.svelte"
-  import {publishReply, session, displayPubkey, mention} from "src/engine"
+  import {
+    Publisher,
+    buildReply,
+    publishToGroupsPublicly,
+    publishToGroupsPrivately,
+    signer,
+    session,
+    getPublishHints,
+    displayPubkey,
+    mention,
+  } from "src/engine"
   import {toastProgress} from "src/app/state"
 
   export let parent
@@ -62,11 +73,32 @@
     const tags = data.mentions.map(mention)
 
     if (content) {
-      const pub = await publishReply(parent, content, tags)
+      const relays = getPublishHints(parent)
+      const address = getGroupAddress(parent)
 
-      dispatch("event", pub.event)
+      // Re-broadcast the note we're replying to
+      if (!parent.wrap) {
+        Publisher.publish({relays, event: asNostrEvent(parent)})
+      }
 
-      pub.on("progress", toastProgress)
+      const template = buildReply(parent, content, tags)
+      const event = await signer.get().signAsUser(template)
+
+      if (address) {
+        if (parent.wrap) {
+          const pubs = await publishToGroupsPrivately([address], template)
+
+          pubs[0].on("progress", toastProgress)
+        } else {
+          const pub = await publishToGroupsPublicly([address], template, relays)
+
+          pub.on("progress", toastProgress)
+        }
+      } else {
+        const pub = Publisher.publish({relays, event})
+
+        pub.on("progress", toastProgress)
+      }
 
       clearDraft()
 

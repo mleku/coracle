@@ -1,14 +1,18 @@
 <script lang="ts">
   import {onMount} from "svelte"
   import {nip19} from "nostr-tools"
-  import {without} from "ramda"
-  import {throttle} from "hurdak"
+  import {without, uniqBy, prop} from "ramda"
+  import {throttle, quantify} from "hurdak"
+  import {createEvent} from "paravel"
   import {writable} from "svelte/store"
   import {annotateMedia} from "src/util/misc"
   import {asNostrEvent} from "src/util/nostr"
   import Anchor from "src/partials/Anchor.svelte"
+  import Card from "src/partials/Card.svelte"
   import Compose from "src/app/shared/Compose.svelte"
   import ImageInput from "src/partials/ImageInput.svelte"
+  import FieldInline from "src/partials/FieldInline.svelte"
+  import Toggle from "src/partials/Toggle.svelte"
   import Media from "src/partials/Media.svelte"
   import Content from "src/partials/Content.svelte"
   import Modal from "src/partials/Modal.svelte"
@@ -16,25 +20,65 @@
   import Field from "src/partials/Field.svelte"
   import Heading from "src/partials/Heading.svelte"
   import RelayCard from "src/app/shared/RelayCard.svelte"
+  import GroupSummary from "src/app/shared/GroupSummary.svelte"
   import NoteContent from "src/app/shared/NoteContent.svelte"
   import RelaySearch from "src/app/shared/RelaySearch.svelte"
-  import {Publisher, publishNote, displayRelay, getUserRelayUrls, mention} from "src/engine"
+  import {
+    Publisher,
+    mergeHints,
+    displayRelay,
+    getUserRelayUrls,
+    getGroupRelayUrls,
+    mention,
+  } from "src/engine"
   import {toastProgress} from "src/app/state"
   import {router} from "src/app/router"
-  import {session, getEventHints, displayPubkey} from "src/engine"
+  import {
+    env,
+    session,
+    signer,
+    getEventHints,
+    displayGroup,
+    groups,
+    publishToGroupsPublicly,
+    publishToGroupsPrivately,
+    deriveGroupAccess,
+  } from "src/engine"
 
   export let quote = null
   export let pubkey = null
-  export let writeTo: string[] | null = null
+  export let group: string | null = quote?.group
 
   let q = ""
+  let view = null
   let images = []
   let warning = null
   let compose = null
   let wordCount = 0
+  let shouldWrap = true
   let showPreview = false
-  let showSettings = false
-  let relays = writable(writeTo ? writeTo : getUserRelayUrls("write"))
+  let groupAddrs = group ? [group] : []
+  let relays = writable(getUserRelayUrls("write"))
+  let relaysDirty = false
+  let canPostPrivately, canPostPublicly
+
+  const groupOptions = session.derived($session => {
+    const options = []
+
+    for (const address of Object.keys($session.groups || {})) {
+      const group = groups.key(address).get()
+
+      if (group) {
+        options.push(group)
+      }
+    }
+
+    for (const address of groupAddrs) {
+      options.push({address})
+    }
+
+    return uniqBy(prop("address"), options)
+  })
 
   const onSubmit = async () => {
     const tags = []
@@ -52,15 +96,34 @@
       tags.push(mention(quote.pubkey))
 
       // Re-broadcast the note we're quoting
-      Publisher.publish({
-        relays: $relays,
-        event: asNostrEvent(quote),
-      })
+      if (!groupAddrs.length) {
+        Publisher.publish({
+          relays: $relays,
+          event: asNostrEvent(quote),
+        })
+      }
     }
 
-    const pub = await publishNote(content, tags, $relays)
+    const template = createEvent(1, {content, tags})
 
-    pub.on("progress", toastProgress)
+    if (groupAddrs.length > 0) {
+      if (shouldWrap) {
+        const pubs = await publishToGroupsPrivately(groupAddrs, template, $relays)
+
+        pubs[0].on("progress", toastProgress)
+      } else {
+        const pub = await publishToGroupsPublicly(groupAddrs, template, $relays)
+
+        pub.on("progress", toastProgress)
+      }
+    } else {
+      const pub = Publisher.publish({
+        relays: $relays,
+        event: await signer.get().signAsUser(template),
+      })
+
+      pub.on("progress", toastProgress)
+    }
 
     router.clearModals()
   }
@@ -79,18 +142,34 @@
     images = without([url], images)
   }
 
-  const closeSettings = () => {
-    q = ""
-    showSettings = false
-  }
-
-  const saveRelay = url => {
+  const addRelay = url => {
     q = ""
     relays.update($r => $r.concat(url))
+    relaysDirty = true
   }
 
   const removeRelay = url => {
     relays.update(without([url]))
+    relaysDirty = true
+  }
+
+  const setGroup = address => {
+    // Reset this, it'll get reset reactively below
+    shouldWrap = true
+
+    if (groupAddrs.includes(address)) {
+      groupAddrs = without([address], groupAddrs)
+    } else {
+      groupAddrs = groupAddrs.concat(address)
+    }
+
+    if (!relaysDirty) {
+      if (groupAddrs.length > 0) {
+        relays.set(mergeHints(groupAddrs.map(getGroupRelayUrls)))
+      } else {
+        relays.set(getUserRelayUrls("write"))
+      }
+    }
   }
 
   const togglePreview = () => {
@@ -102,6 +181,37 @@
       wordCount = compose.parse().match(/\s+/g)?.length || 0
     }
   })
+
+  const showSettings = () => {
+    view = "settings"
+  }
+
+  const showGroups = () => {
+    view = "groups"
+  }
+
+  const hideView = () => {
+    q = ""
+    view = null
+  }
+
+  $: {
+    canPostPrivately = groupAddrs.length > 0
+    canPostPublicly = true
+
+    for (const address of groupAddrs) {
+      const group = groups.key(address).get()
+      const access = deriveGroupAccess(address).get()
+
+      if (group.access === "open" || access !== "granted") {
+        canPostPrivately = false
+      } else if (group.access === "closed") {
+        canPostPublicly = false
+      }
+    }
+
+    shouldWrap = shouldWrap && canPostPrivately
+  }
 
   onMount(() => {
     if (pubkey && pubkey !== $session.pubkey) {
@@ -121,7 +231,22 @@
     <Heading class="text-center">Create a note</Heading>
     <div class="flex w-full flex-col gap-4">
       <div class="flex flex-col gap-2">
-        <strong>What do you want to say?</strong>
+        <div class="flex items-center justify-between">
+          <strong>What do you want to say?</strong>
+          {#if $groupOptions.length > 0}
+            <div
+              class="flex items-center gap-2"
+              class:cursor-pointer={!quote?.group}
+              on:click={quote?.group ? null : showGroups}>
+              <i class="fa fa-circle-nodes" />
+              {#if groupAddrs.length === 1}
+                {displayGroup(groups.key(groupAddrs[0]).get())}
+              {:else}
+                {quantify(groupAddrs.length, "group")}
+              {/if}
+            </div>
+          {/if}
+        </div>
         <div
           class="mt-4 rounded-xl border border-solid border-gray-6 p-3"
           class:bg-input={!showPreview}
@@ -137,10 +262,6 @@
         <div class="flex items-center justify-end gap-2 text-gray-5">
           <small class="hidden sm:block">
             {wordCount} words
-          </small>
-          <span class="hidden sm:block">•</span>
-          <small>
-            Posting as @{displayPubkey($session.pubkey)}
           </small>
           <span>•</span>
           <small on:click={togglePreview} class="cursor-pointer underline">
@@ -162,11 +283,7 @@
           >Send</Anchor>
         <ImageInput multi onChange={addImage} />
       </div>
-      <small
-        class="flex cursor-pointer items-center justify-end gap-4"
-        on:click={() => {
-          showSettings = true
-        }}>
+      <small class="flex cursor-pointer items-center justify-end gap-4" on:click={showSettings}>
         <span><i class="fa fa-server" /> {$relays.length}</span>
         <span><i class="fa fa-warning" /> {warning || 0}</span>
       </small>
@@ -174,42 +291,84 @@
   </Content>
 </form>
 
-{#if showSettings}
-  <Modal onEscape={closeSettings}>
-    <form on:submit|preventDefault={closeSettings}>
+{#if view}
+  <Modal onEscape={hideView}>
+    <form on:submit|preventDefault={(canPostPrivately || canPostPublicly) && hideView}>
       <Content>
-        <div class="mb-4 flex items-center justify-center">
-          <Heading>Note settings</Heading>
-        </div>
-        <Field icon="fa-warning" label="Content warnings">
-          <Input bind:value={warning} placeholder="Why might people want to skip this post?" />
-        </Field>
-        <div>Select which relays to publish to:</div>
-        <div>
-          {#each $relays as url}
-            <div
-              class="mb-2 mr-1 inline-block rounded-full border border-solid border-gray-1 px-2 py-1">
-              <button
-                type="button"
-                class="fa fa-times cursor-pointer"
-                on:click={() => removeRelay(url)} />
-              {displayRelay({url})}
-            </div>
-          {/each}
-        </div>
-        <RelaySearch bind:q limit={3} hideIfEmpty>
-          <div slot="item" let:relay>
-            <RelayCard {relay}>
-              <button
-                slot="actions"
-                class="underline"
-                on:click|preventDefault={() => saveRelay(relay.url)}>
-                Add relay
-              </button>
-            </RelayCard>
+        {#if view === "settings"}
+          <div class="mb-4 flex items-center justify-center">
+            <Heading>Note settings</Heading>
           </div>
-        </RelaySearch>
-        <Anchor tag="button" theme="button" type="submit" class="w-full text-center">Done</Anchor>
+          <Field icon="fa-warning" label="Content warnings">
+            <Input bind:value={warning} placeholder="Why might people want to skip this post?" />
+          </Field>
+          {#if $env.FORCE_RELAYS.length === 0}
+            <Field icon="fa-database" label="Select which relays to publish to">
+              <div>
+                {#each $relays as url}
+                  <div
+                    class="mb-2 mr-1 inline-block rounded-full border border-solid border-gray-1 px-2 py-1">
+                    <button
+                      type="button"
+                      class="fa fa-times cursor-pointer"
+                      on:click={() => removeRelay(url)} />
+                    {displayRelay({url})}
+                  </div>
+                {/each}
+              </div>
+              <RelaySearch bind:q limit={3} hideIfEmpty>
+                <div slot="item" let:relay>
+                  <RelayCard {relay}>
+                    <button
+                      slot="actions"
+                      class="underline"
+                      on:click|preventDefault={() => addRelay(relay.url)}>
+                      Add relay
+                    </button>
+                  </RelayCard>
+                </div>
+              </RelaySearch>
+            </Field>
+          {/if}
+          <Anchor tag="button" theme="button" type="submit" class="w-full text-center">Done</Anchor>
+        {:else if view === "groups"}
+          <div class="mb-4 flex items-center justify-center">
+            <Heading>Post to a group</Heading>
+          </div>
+          {#if canPostPrivately && canPostPublicly}
+            <FieldInline label="Post privately">
+              <Toggle bind:value={shouldWrap} />
+              <p slot="info">
+                When enabled, your note will only be visible to other members of the group.
+              </p>
+            </FieldInline>
+          {/if}
+          {#if !canPostPrivately && !canPostPublicly}
+            <p class="rounded-full border border-solid border-danger bg-gray-8 px-4 py-2">
+              You have selected a mix of public and private groups. Please choose one or the other.
+            </p>
+          {/if}
+          <div>Select any groups you'd like to post to:</div>
+          <div class="flex flex-col gap-2">
+            {#each $groupOptions as g (g.address)}
+              <Card invertColors interactive on:click={() => setGroup(g.address)}>
+                <GroupSummary address={g.address}>
+                  <div slot="actions">
+                    {#if groupAddrs.includes(g.address)}
+                      <i class="fa fa-circle-check text-accent" />
+                    {/if}
+                  </div>
+                </GroupSummary>
+              </Card>
+            {/each}
+          </div>
+          <Anchor
+            tag="button"
+            theme="button"
+            type="submit"
+            class="text-center"
+            disabled={!canPostPrivately && !canPostPublicly}>Done</Anchor>
+        {/if}
       </Content>
     </form>
   </Modal>

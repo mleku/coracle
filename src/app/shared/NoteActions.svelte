@@ -1,11 +1,11 @@
 <script lang="ts">
   import cx from "classnames"
   import {nip19} from "nostr-tools"
-  import {toNostrURI} from "paravel"
+  import {toNostrURI, createEvent} from "paravel"
   import {tweened} from "svelte/motion"
   import {find, pathEq, identity, propEq, sum, pluck, sortBy} from "ramda"
   import {formatSats} from "src/util/misc"
-  import {LOCAL_RELAY_URL, asNostrEvent, getIdOrNaddr} from "src/util/nostr"
+  import {LOCAL_RELAY_URL, getGroupAddress, asNostrEvent, getIdOrAddress} from "src/util/nostr"
   import {quantify} from "hurdak"
   import {toast} from "src/partials/state"
   import Popover from "src/partials/Popover.svelte"
@@ -25,15 +25,19 @@
     canSign,
     session,
     Publisher,
+    publish,
+    signer,
+    publishToGroupsPublicly,
+    publishToGroupsPrivately,
     publishDeletion,
     getUserRelayUrls,
     getPublishHints,
-    publishReaction,
     getSetting,
     processZap,
     displayRelay,
     getEventHints,
     isEventMuted,
+    getReplyTags,
   } from "src/engine"
 
   export let note: Event
@@ -46,7 +50,8 @@
   export let zaps
   export let zapper
 
-  const nevent = nip19.neventEncode({id: note.id, relays: getEventHints(note)})
+  const relays = getEventHints(note)
+  const nevent = nip19.neventEncode({id: note.id, relays})
   const muted = isEventMuted.derived($isEventMuted => $isEventMuted(note, true))
   const interpolate = (a, b) => t => a + Math.round((b - a) * t)
   const likesCount = tweened(0, {interpolate})
@@ -55,31 +60,38 @@
 
   //const report = () => router.at("notes").of(note.id, {relays: getEventHints(note)}).at('report').qp({pubkey: note.pubkey}).open()
 
-  const label = () =>
-    router
-      .at("notes")
-      .of(note.id, {relays: getEventHints(note)})
-      .at("label")
-      .open()
+  const label = () => router.at("notes").of(note.id, {relays}).at("label").open()
 
-  const quote = () =>
-    router
-      .at("notes/create")
-      .cx({quote: note, relays: getEventHints(note)})
-      .open()
+  const quote = () => router.at("notes/create").cx({quote: note, relays}).open()
 
   const unmuteNote = () => unmute(note.id)
 
   const muteNote = () => mute("e", note.id)
 
   const react = async content => {
-    const pub = await publishReaction(note, content)
+    const relays = getPublishHints(note)
+    const address = getGroupAddress(note)
+    const template = createEvent(7, {content, tags: getReplyTags(note)})
 
-    like = pub.event
+    if (!note.wrap) {
+      Publisher.publish({relays, event: asNostrEvent(note)})
+    }
+
+    if (address) {
+      if (note.wrap) {
+        publishToGroupsPrivately([address], template)
+      } else {
+        publishToGroupsPublicly([address], template, relays)
+      }
+    } else {
+      publish(template, {relays})
+    }
+
+    like = await signer.get().signAsUser(template)
   }
 
   const deleteReaction = e => {
-    publishDeletion([getIdOrNaddr(e)])
+    publishDeletion([getIdOrAddress(e)])
 
     like = null
     removeFromContext(e)
@@ -117,16 +129,15 @@
   $: allLikes = like ? likes.filter(n => n.id !== like?.id).concat(like) : likes
   $: $likesCount = allLikes.length
 
-  $: zap = zap || find(pathEq(["request", "pubkey"], $session?.pubkey), zaps)
+  $: zap = zap || find(pathEq($session?.pubkey, ["request", "pubkey"]), zaps)
 
-  $: $zapsTotal =
-    sum(
-      pluck(
-        // @ts-ignore
-        "invoiceAmount",
-        zap ? zaps.filter(n => n.id !== zap?.id).concat(processZap(zap, zapper)) : zaps
-      )
-    ) / 1000
+  $: {
+    const filteredZaps: {invoiceAmount: number}[] = zap
+      ? zaps.filter(n => n.id !== zap?.id).concat(processZap(zap, zapper))
+      : zaps
+
+    $zapsTotal = sum(pluck("invoiceAmount", filteredZaps)) / 1000
+  }
 
   $: canZap = zapper && note.pubkey !== $session?.pubkey
   $: $repliesCount = replies.length
@@ -146,15 +157,15 @@
 
     if ($env.FORCE_RELAYS.length === 0) {
       actions.push({label: "Broadcast", icon: "rss", onClick: broadcast})
-
-      actions.push({
-        label: "Details",
-        icon: "info",
-        onClick: () => {
-          showDetails = true
-        },
-      })
     }
+
+    actions.push({
+      label: "Details",
+      icon: "info",
+      onClick: () => {
+        showDetails = true
+      },
+    })
   }
 </script>
 
@@ -168,7 +179,7 @@
       <i class="fa fa-reply cursor-pointer" />
       {$repliesCount}
     </button>
-    {#if getSetting('enable_reactions')}
+    {#if getSetting("enable_reactions")}
       <button
         class={cx("relative w-16 pt-1 text-left transition-all hover:pb-1 hover:pt-0", {
           "pointer-events-none opacity-50": disableActions || note.pubkey === $session?.pubkey,
@@ -182,7 +193,7 @@
         {$likesCount}
       </button>
     {/if}
-    {#if $env.ENABLE_ZAPS}
+    {#if $env.ENABLE_ZAPS && !note.wrap}
       <button
         class={cx("relative w-16 pt-1 text-left transition-all hover:pb-1 hover:pt-0 sm:w-20", {
           "pointer-events-none opacity-50": disableActions || !canZap,
@@ -274,7 +285,7 @@
       <h1 class="staatliches text-2xl">Details</h1>
       <CopyValue label="Link" value={toNostrURI(nevent)} />
       <CopyValue label="Event ID" encode={nip19.noteEncode} value={note.id} />
-      <CopyValue label="Event JSON" value={JSON.stringify(note)} />
+      <CopyValue label="Event JSON" value={JSON.stringify(asNostrEvent(note))} />
     </Content>
   </Modal>
 {/if}
