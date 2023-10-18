@@ -20,6 +20,7 @@
   import {
     env,
     load,
+    nip59,
     people,
     loadOne,
     getLnUrl,
@@ -30,6 +31,7 @@
     getEventHints,
     getIdFilters,
     getReplyFilters,
+    getRecipientKey,
     selectHints,
     mergeHints,
     loadPubkeys,
@@ -50,6 +52,7 @@
   export let showMuted = false
 
   let zapper, unsubZapper
+  let ready = false
   let event = note
   let reply = null
   let replyIsActive = false
@@ -165,19 +168,23 @@
       })
     }
 
-    if (event.pubkey) {
-      const hints = getReplyHints(event)
+    if (event.kind === 1059) {
+      event = await nip59.get().unwrap(event, getRecipientKey(event))
+    }
 
+    ready = true
+
+    if (event.pubkey) {
       loadPubkeys([event.pubkey])
 
       const kinds = [1, 7]
 
-      if ($env.ENABLE_ZAPS) {
+      if ($env.ENABLE_ZAPS && !event.wrap) {
         kinds.push(9735)
       }
 
       load({
-        relays: mergeHints([relays, hints]).concat(LOCAL_RELAY_URL),
+        relays: mergeHints([relays, getReplyHints(event)]).concat(LOCAL_RELAY_URL),
         filters: getReplyFilters([event], {kinds}),
         onEvent: batch(200, events => {
           ctx = uniqBy(prop("id"), ctx.concat(events))
@@ -191,7 +198,7 @@
   })
 </script>
 
-{#if event.pubkey}
+{#if ready}
   {@const path = router
     .at("notes")
     .of(event.id, {relays: getEventHints(event)})

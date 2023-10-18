@@ -1,7 +1,7 @@
 <script lang="ts">
   import cx from "classnames"
   import {nip19} from "nostr-tools"
-  import {toNostrURI} from "paravel"
+  import {toNostrURI, createEvent} from "paravel"
   import {tweened} from "svelte/motion"
   import {find, pathEq, identity, propEq, sum, pluck, sortBy} from "ramda"
   import {formatSats} from "src/util/misc"
@@ -28,11 +28,12 @@
     publishDeletion,
     getUserRelayUrls,
     getPublishHints,
-    publishReaction,
     processZap,
     displayRelay,
     getEventHints,
     isEventMuted,
+    getReplyTags,
+    wrapOrSign,
   } from "src/engine"
 
   export let note: Event
@@ -72,9 +73,15 @@
   const muteNote = () => mute("e", note.id)
 
   const react = async content => {
-    const pub = await publishReaction(note, content)
+    const relays = getPublishHints(parent)
 
-    like = pub.event
+    like = await wrapOrSign(note.group, createEvent(7, {content, tags: getReplyTags(note)}))
+
+    if (!note.wrap) {
+      Publisher.publish({relays, event: asNostrEvent(note)})
+    }
+
+    Publisher.publish({relays, event: like})
   }
 
   const deleteReaction = e => {
@@ -118,14 +125,13 @@
 
   $: zap = zap || find(pathEq(["request", "pubkey"], $session?.pubkey), zaps)
 
-  $: $zapsTotal =
-    sum(
-      pluck(
-        // @ts-ignore
-        "invoiceAmount",
-        zap ? zaps.filter(n => n.id !== zap?.id).concat(processZap(zap, zapper)) : zaps
-      )
-    ) / 1000
+  $: {
+    const filteredZaps: {invoiceAmount: number}[] = zap
+      ? zaps.filter(n => n.id !== zap?.id).concat(processZap(zap, zapper))
+      : zaps
+
+    $zapsTotal = sum(pluck("invoiceAmount", filteredZaps)) / 1000
+  }
 
   $: canZap = zapper && note.pubkey !== $session?.pubkey
   $: $repliesCount = replies.length
@@ -145,15 +151,15 @@
 
     if ($env.FORCE_RELAYS.length === 0) {
       actions.push({label: "Broadcast", icon: "rss", onClick: broadcast})
-
-      actions.push({
-        label: "Details",
-        icon: "info",
-        onClick: () => {
-          showDetails = true
-        },
-      })
     }
+
+    actions.push({
+      label: "Details",
+      icon: "info",
+      onClick: () => {
+        showDetails = true
+      },
+    })
   }
 </script>
 
@@ -179,7 +185,7 @@
         })} />
       {$likesCount}
     </button>
-    {#if $env.ENABLE_ZAPS}
+    {#if $env.ENABLE_ZAPS && !note.wrap}
       <button
         class={cx("relative w-16 pt-1 text-left transition-all hover:pb-1 hover:pt-0 sm:w-20", {
           "pointer-events-none opacity-50": disableActions || !canZap,

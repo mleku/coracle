@@ -2,7 +2,6 @@ import {
   reject,
   partition,
   find,
-  propEq,
   uniqBy,
   identity,
   pluck,
@@ -170,7 +169,7 @@ export class FeedLoader {
                 break
               }
 
-              if (noteKinds.includes(e.kind) && !find(propEq("id", e.id), parent.replies || [])) {
+              if (noteKinds.includes(e.kind) && !find(r => r.id === e.id, parent.replies || [])) {
                 pushToKey(parent as any, "replies", e)
               }
 

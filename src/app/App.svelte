@@ -29,6 +29,12 @@
   import DataExport from "src/app/views/DataExport.svelte"
   import DataImport from "src/app/views/DataImport.svelte"
   import Explore from "src/app/views/Explore.svelte"
+  import GroupList from "src/app/views/GroupList.svelte"
+  import GroupDetail from "src/app/views/GroupDetail.svelte"
+  import GroupCreate from "src/app/views/GroupCreate.svelte"
+  import GroupEdit from "src/app/views/GroupEdit.svelte"
+  import GroupInfo from "src/app/views/GroupInfo.svelte"
+  import GroupRotate from "src/app/views/GroupRotate.svelte"
   import Help from "src/app/views/Help.svelte"
   import Feeds from "src/app/views/Feeds.svelte"
   import LabelCreate from "src/app/views/LabelCreate.svelte"
@@ -76,6 +82,7 @@
     router,
     asChannelId,
     asPerson,
+    asGroup,
     asCsv,
     asString,
     asUrlComponent,
@@ -111,6 +118,31 @@
   })
 
   router.register("/explore", Explore)
+
+  router.register("/groups", GroupList)
+  router.register("/groups/new", GroupCreate)
+  router.register("/groups/:entity/edit", GroupEdit, {
+    serializers: {
+      entity: asGroup,
+    },
+  })
+  router.register("/groups/:entity/info", GroupInfo, {
+    serializers: {
+      entity: asGroup,
+    },
+  })
+  router.register("/groups/:entity/rotate", GroupRotate, {
+    serializers: {
+      entity: asGroup,
+      addMembers: asCsv("addMembers"),
+      removeMembers: asCsv("removeMembers"),
+    },
+  })
+  router.register("/groups/:entity/:activeTab", GroupDetail, {
+    serializers: {
+      entity: asGroup,
+    },
+  })
 
   router.register("/help/:topic", Help)
 
@@ -161,6 +193,7 @@
     requireUser: true,
     serializers: {
       pubkey: asPerson,
+      groupPubkey: asGroup,
     },
   })
   router.register("/notes/:entity", NoteDetail, {

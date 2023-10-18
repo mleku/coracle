@@ -1,4 +1,3 @@
-import type {AddressPointer} from "nostr-tools/lib/nip19"
 import {nip19} from "nostr-tools"
 import {sortBy} from "ramda"
 import {fromNostrURI, Tags} from "paravel"
@@ -82,7 +81,7 @@ export class Naddr {
   static decode = naddr => {
     const {type, data} = nip19.decode(naddr) as {
       type: "naddr"
-      data: AddressPointer
+      data: any
     }
 
     if (type !== "naddr") {

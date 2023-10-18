@@ -1,5 +1,6 @@
 import {last, fromPairs, identity} from "ramda"
 import {fromNostrURI} from "paravel"
+import {ucFirst} from "hurdak"
 import {nip19} from "nostr-tools"
 import {Router} from "src/util/router"
 import {tryJson} from "src/util/misc"
@@ -11,6 +12,7 @@ import {
   selectHints,
   getNip24ChannelId,
   getPubkeyHints,
+  getGroupHints,
 } from "src/engine"
 
 // Decoders
@@ -104,6 +106,19 @@ export const asPerson = {
   decode: decodePerson,
 }
 
+export const asGroup = {
+  encode: nip19.npubEncode,
+  decode: entity => {
+    const data = {}
+
+    for (const [k, v] of Object.entries(decodePerson(entity))) {
+      data[`group${ucFirst(k)}`] = v
+    }
+
+    return data
+  },
+}
+
 export const asRelay = {
   encode: nip19.nrelayEncode,
   decode: decodeRelay,
@@ -143,6 +158,14 @@ router.extend("notes", (id, {relays = []} = {}) => {
 router.extend("people", (pubkey, {relays = []} = {}) => {
   if (relays.length < 3) {
     relays = relays.concat(getPubkeyHints.limit(3 - relays.length).getHints(pubkey))
+  }
+
+  return nip19.nprofileEncode({pubkey, relays})
+})
+
+router.extend("groups", (pubkey, {relays = []} = {}) => {
+  if (relays.length < 3) {
+    relays = relays.concat(getGroupHints.limit(3 - relays.length).getHints(pubkey))
   }
 
   return nip19.nprofileEncode({pubkey, relays})

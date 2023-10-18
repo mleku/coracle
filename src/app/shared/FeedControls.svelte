@@ -1,5 +1,5 @@
 <script lang="ts">
-  import {pluck, not, find, propEq, prop, equals, omit, objOf} from "ramda"
+  import {pluck, not, propEq, prop, equals, omit, objOf} from "ramda"
   import {displayList} from "hurdak"
   import {debounce} from "throttle-debounce"
   import {createLocalDate, fuzzy, formatTimestampAsDate} from "src/util/misc"
@@ -157,7 +157,7 @@
   }
 
   const getFormFilter = () => ({
-    kinds: filter.kinds?.map(k => find(propEq("kind", k), kinds)),
+    kinds: filter.kinds?.map((k: number) => kinds.find(propEq("kind", k))),
     since: filter.since,
     until: filter.until,
     search: filter.search || "",
